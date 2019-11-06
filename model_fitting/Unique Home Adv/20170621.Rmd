@@ -1,0 +1,115 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(rstan)
+library(bayesplot)
+```
+
+```{r}
+# setwd("~/Honours/Data/Scrapping/Model Fitting")
+nba <- read.csv("UpdatedFinalDataFrame21.csv", header = T)
+# 
+# nba$score_diff <- nba$H.Score - nba$A.Score
+# 
+# nba$nteams <- length(unique(nba$Home.Team))
+# nba$ngames <- length(nba$score_diff)
+# nba$nweeks <- floor(2*nba$ngames/nba$nteams) 
+```
+
+#STAN code
+```{stan output.var="nba_model"}
+data{
+int<lower=1> nteams; 
+int<lower=1> ngames;
+int<lower=1> nweeks;
+int<lower=1> home_week[ngames]; // week number for the home team
+int<lower=1> away_week[ngames]; // week number for the away team
+int<lower=1, upper=nteams> home_team[ngames]; // home team ID (1, ..., 20)
+int<lower=1, upper=nteams> away_team[ngames]; // away team ID (1, ..., 20)
+vector[ngames] score_diff; // home_goals - away_goals
+
+}
+parameters {
+real b_home; // the effect of hosting the game in mean of score_diff dist.
+//real b_prev; // regression coefficient of prev_perf
+real<lower=0> sigma_a0; // teams ability variation
+real<lower=0> tau_a; // hyper-param for game-to-game variation
+real<lower=1> nu; // t-dist degree of freedom
+real<lower=0> sigma_y; // score_diff variation
+row_vector<lower=0>[nteams] sigma_a_raw; // game-to-game variation
+matrix[nweeks,nteams] eta_a; // random component
+}
+
+transformed parameters {
+matrix[nweeks, nteams] a; // team abilities
+row_vector<lower=0>[nteams] sigma_a; // game-to-game variation
+vector[ngames] a_diff;
+vector[ngames] mu;
+a[1] =  sigma_a0 * eta_a[1]; // initial abilities (at week 1)
+sigma_a = tau_a * sigma_a_raw; //performance evolves from week to week
+  for (w in 2:nweeks) {
+    a[w] = a[w-1] + sigma_a .* eta_a[w]; // evolution of abilities
+  }
+  for (g in 1:ngames) {
+    a_diff[g] = a[home_week[g],home_team[g]] - a[away_week[g],away_team[g]];
+    // additional reg parameters e.g. rest of home, rest of away team
+    mu[g] = a_diff[g] + b_home; // + beta1*resthome[g] + beta2*restaway[g](come in via the data section)
+  }
+}
+
+model {
+
+// Priors
+nu ~ gamma(2,0.1);
+//b_prev ~ normal(0,1);
+sigma_a0 ~ normal(0,1);
+sigma_y ~ cauchy(0,5); 
+b_home ~ normal(0,100); //blangiardo uses N(0,0.0001)
+sigma_a_raw ~ normal(0,1);
+tau_a ~ cauchy(0,1);
+to_vector(eta_a) ~ normal(0,1);
+// Likelihood
+score_diff ~ student_t(nu, mu, sigma_y);
+}
+
+generated quantities {
+vector[ngames] score_diff_rep;
+for (g in 1:ngames)
+score_diff_rep[g] = student_t_rng(nu, a[home_week[g], home_team[g]] -a[away_week[g],away_team[g]]+b_home, sigma_y);
+}
+
+```
+
+##Fitting the model
+
+```{r}
+nba <- read.csv("UpdatedFinalDataFrame2.csv", header = T)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+nsamples <- 2000
+dat <- NULL
+dat$nteams <- 30
+dat$ngames <- 1230
+dat$nweeks <- 82
+dat$home_team <- nba$H.Team.ID
+dat$away_team <- nba$Away.Team.ID
+dat$home_week <- nba$home_week
+dat$away_week <- nba$away_week
+dat$score_diff <- nba$H.Score - nba$A.Score
+
+
+fit <- sampling(nba_model, chains = 4, iter = (nsamples/2), data = dat)
+
+vectofOBS <- dat$score_diff  
+```
+
+```{r}
+launch_shinystan(fit)
+
+```
+

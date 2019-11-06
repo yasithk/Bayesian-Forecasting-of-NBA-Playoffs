@@ -1,0 +1,230 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(rstan)
+library(bayesplot)
+```
+
+#Before I start model- 
+I will need to edit the dataset such that I have columns for win/lose streak at every week. 
+
+```{r}
+setwd("~/Honours/Model/Model Fitting/Player Rest/Data")
+#library(readr)
+nba <- read.csv(file = "daysofrest.csv", header = TRUE)
+# 
+# nba$score_diff <- nba$H.Score - nba$A.Score
+# 
+# nba$nteams <- length(unique(nba$Home.Team))
+# nba$ngames <- length(nba$score_diff)
+# nba$nweeks <- floor(2*nba$ngames/nba$nteams) 
+```
+
+#STAN code
+this is the stan code for incorporating the days of rest the home and away team has had prior to their game. 
+
+I have used a classification for 1,2,3, 4 of more days of rest and estimated coefficients for each. 
+
+**I have not combined the unique home effect with the team rest here. 
+```{stan output.var="nba_model"}
+data{
+int<lower=1> nteams; 
+int<lower=1> ngames;
+int<lower=1> nweeks;
+int<lower=0, upper=1> resthome2[ngames]; //2 days of rest of home team
+int<lower=0, upper=1> resthome3[ngames]; //3 days of rest for home team
+int<lower=0, upper=1> resthome4[ngames]; // 4 or more days of rest for home team
+int<lower=0, upper=1> restaway2[ngames]; // 2 days rest away team
+int<lower=0, upper=1> restaway3[ngames]; // 3 day of rest for away team
+int<lower=0, upper=1> restaway4[ngames]; // 4 or more days of rest for away team
+
+int<lower=1> home_week[ngames]; // week number for the home team
+int<lower=1> away_week[ngames]; // week number for the away team
+int<lower=1, upper=nteams> home_team[ngames]; // home team ID (1, ..., 20)
+int<lower=1, upper=nteams> away_team[ngames]; // away team ID (1, ..., 20)
+vector[ngames] score_diff; // home_goals - away_goals
+
+}
+parameters {
+real b_home; // the effect of hosting the game in mean of score_diff dist.
+//real b_prev; // regression coefficient of prev_perf
+
+
+//real beta1; //regression coefficient of days of rest home
+real beta2h; //regression coefficient of days of rest aways
+real beta3h;
+real beta4h;
+real beta2a;
+real beta3a;
+real beta4a;
+
+real<lower=0> sigma_a0; // teams ability variation
+real<lower=0> tau_a; // hyper-param for game-to-game variation
+real<lower=1> nu; // t-dist degree of freedom
+real<lower=0> sigma_y; // score_diff variation
+row_vector<lower=0>[nteams] sigma_a_raw; // game-to-game variation
+matrix[nweeks,nteams] eta_a; // random component
+}
+
+transformed parameters {
+matrix[nweeks, nteams] a; // team abilities
+row_vector<lower=0>[nteams] sigma_a; // game-to-game variation
+vector[ngames] a_diff;
+vector[ngames] mu;
+a[1] =  sigma_a0 * eta_a[1]; // initial abilities (at week 1)
+sigma_a = tau_a * sigma_a_raw; //performance evolves from week to week
+  for (w in 2:nweeks) {
+    a[w] = a[w-1] + sigma_a .* eta_a[w]; // evolution of abilities
+  }
+  for (g in 1:ngames) {
+    a_diff[g] = a[home_week[g],home_team[g]] - a[away_week[g],away_team[g]];
+    // additional reg parameters e.g. rest of home, rest of away team
+    mu[g] = a_diff[g] + b_home  + beta2h*resthome2[g] + beta3h*resthome3[g] + beta4h*resthome4[g] + beta2a*restaway2[g]
+    + beta3a*restaway3[g] + beta4a*restaway4[g];
+    //(come in via the data section)
+  }
+}
+
+model {
+
+// Priors
+nu ~ gamma(2,0.1);
+//b_prev ~ normal(0,1);
+
+beta2h ~ normal(0,10); //prior on beta1
+beta3h ~ normal(0,10); //prior on beta2
+beta4h ~ normal(0,10);
+beta2a ~ normal(0,10);
+beta3a ~ normal(0,10);
+beta4a ~ normal(0,10);
+
+sigma_a0 ~ normal(0,1);
+sigma_y ~ cauchy(0,5); 
+b_home ~ normal(0,100); //blangiardo uses N(0,0.0001)
+sigma_a_raw ~ normal(0,1);
+tau_a ~ cauchy(0,1);
+to_vector(eta_a) ~ normal(0,1);
+// Likelihood
+score_diff ~ student_t(nu, mu, sigma_y);
+}
+
+generated quantities {
+vector[ngames] score_diff_rep;
+for (g in 1:ngames)
+score_diff_rep[g] = student_t_rng(nu, a[home_week[g], home_team[g]] -a[away_week[g],away_team[g]]+b_home, sigma_y);
+}
+
+```
+
+##Fitting the model
+
+```{r}
+nba <- read.csv("daysofrest.csv", header = TRUE)
+#THE DATASET ATTACHED HAS TREATED NaN AS 0S
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+nsamples <- 2000
+dat <- NULL
+dat$nteams <- 30
+dat$ngames <- 1230
+dat$nweeks <- 82
+dat$home_team <- nba$H.Team.ID
+dat$away_team <- nba$Away.Team.ID
+dat$home_week <- nba$home_week
+dat$away_week <- nba$away_week
+dat$score_diff <- nba$H.Score - nba$A.Score
+
+dat$resthome2 <- as.numeric(nba$DaysofRest.Home.Team == 2)
+dat$resthome3 <- as.numeric(nba$DaysofRest.Home.Team == 3)
+dat$resthome4 <- as.numeric(nba$DaysofRest.Home.Team == 0 | nba$DaysofRest.Home.Team > 3)
+dat$restaway2 <- as.numeric(nba$DaysofRest.Away.Team == 2)
+dat$restaway3 <- as.numeric(nba$DaysofRest.Away.Team == 3)
+dat$restaway4 <- as.numeric(nba$DaysofRest.Away.Team == 0 | nba$DaysofRest.Home.Team > 3)
+
+fit <- sampling(nba_model, chains = 4, iter = (nsamples/2), data = dat)
+
+vectofOBS <- dat$score_diff  
+```
+
+```{r}
+library(shinystan)
+launch_shinystan(fit)
+```
+
+#Parameter Estimates
+```{r}
+sum_fit <- summary(fit)
+sf <- sum_fit$summary
+sf
+```
+
+#Model Checking
+
+Check weather the actual score differences are consistent with the distribution of the replicated date. 
+All 1230 games are scorted according to their score differences (shown in black dots). 
+For each game, the median of the replicate score differences is shown in red, the 95% uncertainty interval is shown in light yellow, and the 50% uncertainty interval is shown in dark yellow.
+```{r}
+library(matrixStats)
+#fit <- readRDS("FITS/fit_38.rds")
+sims <- extract(fit)
+scd <- dat$score_diff
+scd_sims <- sims$score_diff_rep
+scd_hat <- colMedians(scd_sims)
+alpha <- 0.95
+scd_ub <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+ci95 <- sum(scd < scd_ub & scd_lb<scd)/380
+alpha <- 0.5
+scd_ub <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+ci50 <- sum(scd < scd_ub & scd_lb<scd)/380
+```
+
+```{r}
+library(ggplot2)
+#library(matrixStats)
+#fit <- readRDS("FITS/fit_38.rds")
+sims <- extract(fit)
+scd <- dat$score_diff
+scd_sims <- sims$score_diff_rep
+scd_hat <- colMedians(scd_sims)
+scd_se <- sqrt(colVars(scd_sims))
+alpha <- 0.95;
+scd_ub <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+alpha <- 0.5;
+scd_ub2 <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb2 <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+
+sort_scd <- scd[order(scd)]
+sort_scd_hat <- scd_hat[order(scd)]
+sort_scd_se <- scd_se[order(scd)]
+sort_scd_ub <- scd_ub[order(scd)]
+sort_scd_lb <- scd_lb[order(scd)]
+sort_scd_ub2 <- scd_ub2[order(scd)]
+sort_scd_lb2 <- scd_lb2[order(scd)]
+df <- data.frame(list(scd = sort_scd, scd_hat = sort_scd_hat, scd_se = sort_scd_se, 
+                      scd_ub = sort_scd_ub, scd_lb = sort_scd_lb, 
+                      scd_ub2 = sort_scd_ub2, scd_lb2 = sort_scd_lb2))
+
+ggplot(df, aes(x = c(1:1230))) +
+  geom_ribbon(aes(ymin = scd_lb,
+                  ymax = scd_ub),
+              fill="lightyellow") + 
+  geom_ribbon(aes(ymin = scd_lb2,
+                  ymax = scd_ub2),
+              fill="khaki3") + 
+  geom_line(aes(y=scd_hat),colour="darkred") + 
+  geom_point(aes(y=scd), size = 0.3) +
+  scale_x_continuous(name="match") +
+  scale_y_continuous(name="score difference", minor_breaks = seq(-6, 6, 1), 
+                     sec.axis = dup_axis()) +
+  ggtitle("Estimated score differences using Player Rest Feature")
+
+```
+

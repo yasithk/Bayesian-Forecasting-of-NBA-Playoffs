@@ -1,0 +1,323 @@
+---
+title: "20130713playerabilities1"
+author: "Yasith"
+date: "13 July 2017"
+output: html_document
+---
+
+```{r}
+library(rstan)
+library(bayesplot)
+library(dplyr)
+```
+
+```{r}
+#setwd("//uniwa.uwa.edu.au/userhome/Students1/21511941/My Documents/Honours/Thesis/20170715/lol/Weights")
+#nba <- read.csv(file = "data.csv", header = TRUE)
+```
+
+```{stan output.var="reg_nba_model"}
+data{
+int<lower=1> nteams; 
+int<lower=1> ngames;
+int<lower=1> nweeks;
+int<lower=1> nplayers;
+int<lower=1> h_nplayers[ngames]; //number of players played in the home team
+int<lower=1> a_nplayers[ngames]; //number of players played in the away team
+
+//int<lower=1> away_week[ngames]; // week number for the away team
+int<lower=1, upper=nteams> home_team[ngames]; // home team ID (1, ..., 20)
+int<lower=1, upper=nteams> away_team[ngames]; // away team ID (1, ..., 20)
+matrix[ngames, 12] h_weights; // R matrix for minute weightings [game_id, player_id, weights] 
+matrix[ngames, 12] a_weights; // matrix with away players weights
+int h_players[ngames, 12]; // matrix with home player ids
+int a_players[ngames, 12]; // matrix with away players ids 
+vector[ngames] score_diff; // home_goals - away_goals
+}
+
+parameters {
+vector[nplayers] home_player_ability; // ability of each player
+vector[nplayers] away_player_ability;
+vector [nteams] b_home; 
+real<lower=1> nu; // t-dist degree of freedom
+real<lower=0> sigma_y; // score_diff variation
+real<lower=0> sd_ability;
+real<lower=0> sigma_b; // std for home_effect
+real beta2h; //regression coefficient of days of rest aways
+}
+
+transformed parameters{
+vector[ngames] home_strength; // team ability for each game (week) - we can call the ability by each team's week they are playing and their home or away id.
+vector[ngames] away_strength;
+//Accessing Subarrays The subscripting operator also returns subarrays of arrays. For example, if x is oftype 
+//real[,,  ], then x[2] is of type real[ , ], and x[2,3] is of type real[].
+vector[ngames] a_diff;
+vector[ngames] mu;
+for( g in 1:ngames){
+  home_strength[g] = 0;
+    for( i in 1:h_nplayers[g]){
+    home_strength[g] = home_strength[g] + h_weights[g,i]*home_player_ability[h_players[g,i]];
+    }
+}
+  
+for( g in 1:ngames){
+  away_strength[g] = 0;
+    for( i in 1:a_nplayers[g]){
+    away_strength[g] = away_strength[g] + a_weights[g,i]*away_player_ability[a_players[g,i]];
+      // additional covariates
+    }
+}
+  
+for(g in 1:ngames){
+  a_diff[g] = home_strength[g] - away_strength[g];
+  mu[g] = a_diff[g] ;
+  }
+}
+
+model {
+// Priors
+nu ~ gamma(2,0.1);
+sigma_y ~ cauchy(0,5); 
+b_home ~ normal(0, sigma_b); //blangiardo uses N(0,0.0001)
+sigma_b ~ cauchy(0,5);
+home_player_ability ~ normal(0, sd_ability);
+away_player_ability ~ normal(0, sd_ability);
+sd_ability ~ cauchy(0,5);
+
+// Likelihood
+score_diff ~ student_t(nu, mu, sigma_y);
+}
+
+generated quantities {
+  vector[ngames] score_diff_rep;
+  for (g in 1:ngames){
+  score_diff_rep[g] = student_t_rng(nu, mu[g], sigma_y);
+  }
+  
+}
+
+```
+
+
+
+```{r}
+nba <- read.csv("XXX3.csv", header = TRUE)
+#nba <- nba %>% filter(Game.ID != 47 | Game.ID != 311 |Game.ID != 990 |Game.ID != 996 |Game.ID != 1106 )
+# rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+ # x <- nba %>% select( A.Player1,A.Player2, A.Player3, A.Player4, A.Player5, A.Player6, A.Player7, A.Player8, A.Player9, A.Player10, A.Player11, A.Player12, H.Player1, H.Player2, H.Player3, H.Player4, H.Player5, H.Player6, H.Player7, H.Player8, H.Player9, H.Player10, H.Player11, H.Player12 )
+ # x[is.na(x)] <- 0
+#max(x) = 478 therefore 478 different players. 
+
+nsamples <- 5000
+dat <- NULL
+dat$nteams <- 30
+dat$ngames <- 1230
+dat$nweeks <- 82
+dat$h_nplayers <- nba$No.of.Players.H
+dat$a_nplayers <- nba$No.of.Players.A
+dat$nplayers <- 534
+dat$h_weights <-  select(nba,  "WH1", "WH2", "WH3", "WH4", "WH5", "WH6", "WH7", "WH8", "WH9", "WH10", "WH11", "WH12")
+dat$a_weights <- select(nba,  "WA1", "WA2", "WA3", "WA4", "WA5", "WA6", "WA7", "WA8", "WA9", "WA10", "WA11", "WA12")
+dat$h_players <- select(nba,  "H.Player1", "H.Player2", "H.Player3", "H.Player4", "H.Player5","H.Player6" , "H.Player7", "H.Player8", "H.Player9", "H.Player10", "H.Player11", "H.Player12")
+dat$a_players <- select(nba,  "A.Player1", "A.Player2", "A.Player3", "A.Player4", "A.Player5", "A.Player6", "A.Player7", "A.Player8", "A.Player9", "A.Player10", "A.Player11", "A.Player12")
+
+dat$h_players[is.na(dat$h_players)] <- 0
+dat$a_players[is.na(dat$a_players)] <- 0
+dat$h_weights[is.na(dat$h_weights)] <- 0
+dat$a_weights[is.na(dat$a_weights)] <- 0
+
+dat$home_team <- nba$H.Team.ID
+dat$away_team <- nba$Away.Team.ID
+# dat$home_week <- nba$home_week
+# dat$away_week <- nba$away_week
+dat$resthome2 <- as.numeric(nba$DaysofRest.Home.Team == 2)
+dat$resthome3 <- as.numeric(nba$DaysofRest.Home.Team == 3)
+dat$resthome4 <- as.numeric(nba$DaysofRest.Home.Team == 0 | nba$DaysofRest.Home.Team > 3)
+dat$restaway2 <- as.numeric(nba$DaysofRest.Away.Team == 2)
+dat$restaway3 <- as.numeric(nba$DaysofRest.Away.Team == 3)
+dat$restaway4 <- as.numeric(nba$DaysofRest.Away.Team == 0 | nba$DaysofRest.Home.Team > 3)
+dat$score_diff <- nba$H.Score - nba$A.Score
+
+fit <- sampling(reg_nba_model, chains = 4, iter = (nsamples/2), data = dat)
+vectofOBS <- dat$score_diff  
+
+# saveRDS(fit, "player_effects")
+
+
+```
+
+```{r}
+launch_shinystan(fit)
+```
+
+###
+```{r}
+# str(as.matrix(fit, pars= "total_away_strength"))
+home_player_ability <- as.data.frame(fit, pars= "home_player_ability")
+away_player_ability <- as.data.frame(fit, pars= "away_player_ability")
+home_matrix <- as.matrix(fit, pars= "home_strength")
+away_matrix <- as.matrix(fit, pars= "away_strength")
+b_home <- as.matrix(fit, pars="b_home")
+
+#(2000 x 30)
+# h_team_cor1 <- h_team_strengths
+# a_team_cor1 <- a_team_strengths
+# 
+# cor_vec <- as.vector(rep(0,30))
+# #using 500 samples for now 
+# for( i in 1:30){
+#   cor_vec[i] <- cor(h_team_cor1[c(1:500),i], a_team_cor1[c(1:500),i])
+# }
+
+#plot(home_matrix[,1], alt_away_matrix[,1])
+#par(mfrow=c(3,10))
+
+
+```
+
+#Average home and away strengths to use as priors for playoffs
+```{r}
+
+#find the game ids played at home by each team
+home_games <- matrix(data = NA, nrow = 41, ncol = 30)
+for( i in 1:30){
+  m1 <- select(filter(nba, H.Team.ID == i), Game.ID)
+  m2 <- melt(m1)
+  m3 <- m2$value
+  home_games[,i] <- m3
+}
+  
+home_team_strengths <- array(data =NA, dim = c(2000,41,30))
+for( i in 1:30){
+  home_team_strengths[,,i] <- home_matrix[, home_games[,i]]
+}
+
+#find the game ids played at away by each team
+away_games <- matrix(data = NA, nrow = 41, ncol = 30)
+for( i in 1:30){
+  a1 <- select(filter(nba, Away.Team.ID == i), Game.ID)
+  a2 <- melt(a1)
+  a3 <- a2$value
+  away_games[,i] <- a3
+}
+
+away_avg_strenghts <- array(data=NA, dim = c(2000,41,30))
+for( i in 1:30){
+  away_avg_strenghts[,,i] <- away_matrix[,away_games[,i]]
+}
+
+#Average home and away strengths to use as priors for playoffs
+avg <- matrix(data = NA, ncol = 2, nrow = 30)
+for(i in 1:30){
+  avg[i,1] <- mean(colMeans((home_team_strengths[,,i])))
+}
+for(i in 1:30){
+  avg[i,2] <- mean(colMeans(away_avg_strenghts[,,i]))
+}
+
+
+std <- matrix(data = NA, ncol = 30, nrow = 2)
+for(i in 1:30){
+  std[1,i] <- sd((home_matrix[,i]/82))
+}
+for(i in 1:30){
+  std[2,i] <- sd((away_matrix[,i]/82))
+}
+std
+#Standard deviation of home and away strengths
+
+
+
+```
+
+#Parameter Estimates
+```{r}
+#str(fit)
+sum_fit <- summary(fit)
+sum <- sum_fit$
+#sum_fit$summary["avg_away_strength[12]"]
+
+```
+
+##Player Checking
+```{r}
+posterior <- as.array(fit)
+dimnames(posterior)
+library(bayesplot)
+color_scheme_set("blue")
+mcmc_intervals(posterior, pars = c("player_ability[288]", "player_ability[298]","player_ability[331]", "player_ability[446]", "player_ability[475]", "player_ability[497]", "player_ability[22]", "player_ability[50]", "player_ability[73]",  
+"player_ability[323]", "player_ability[132]", "player_ability[452]", "player_ability[390]", "player_ability[32]", "player_ability[491]", "player_ability[344]", "player_ability[355]", "player_ability[105]", "player_ability[327]", "player_ability[471]")) 
+
+
+```
+#Player effects check
+```{r}
+#setwd("~/Honours/Data/Scrapping/Dataframes")
+players <- read.csv("playernames.csv", header = TRUE)
+#download the top10 players from stan 
+players1 <- read.csv("top10players.csv", header = TRUE)
+for( i in 1:nrow(players1)){
+  players1$playerID[i] <- as.numeric(gsub("[^[:digit:]]","" , players1[i,1]))
+}
+for(i in 1:nrow(players1)){
+  players1[i,13] <- as.character(filter(players,players1$playerID[i] == players$Player.ID )[1,1])
+}
+
+for(i in 1:nrow(players1)){
+  players1$Name[i] <- as.character(players$Starters[players1$playerID[i]])
+}
+
+players1 <- as.data.frame(players1)
+players1 <- select(players1, -playerID, -V13)
+players1 <- players1[c(12,2:11)]
+
+```
+
+
+#Model Checking
+```{r}
+library(ggplot2)
+library(matrixStats)
+#fit <- readRDS("FITS/fit_38.rds")
+sims <- extract(fit)
+scd <- dat$score_diff
+scd_sims <- sims$score_diff_rep
+scd_hat <- colMedians(scd_sims)
+scd_se <- sqrt(colVars(scd_sims))
+alpha <- 0.95;
+scd_ub <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+alpha <- 0.5;
+scd_ub2 <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb2 <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+
+sort_scd <- scd[order(scd)]
+sort_scd_hat <- scd_hat[order(scd)]
+sort_scd_se <- scd_se[order(scd)]
+sort_scd_ub <- scd_ub[order(scd)]
+sort_scd_lb <- scd_lb[order(scd)]
+sort_scd_ub2 <- scd_ub2[order(scd)]
+sort_scd_lb2 <- scd_lb2[order(scd)]
+df <- data.frame(list(scd = sort_scd, scd_hat = sort_scd_hat, scd_se = sort_scd_se, 
+                      scd_ub = sort_scd_ub, scd_lb = sort_scd_lb, 
+                      scd_ub2 = sort_scd_ub2, scd_lb2 = sort_scd_lb2))
+
+ggplot(df, aes(x = c(1:1230))) +
+  geom_ribbon(aes(ymin = scd_lb,
+                  ymax = scd_ub),
+              fill="lightyellow") + 
+  geom_ribbon(aes(ymin = scd_lb2,
+                  ymax = scd_ub2),
+              fill="khaki3") + 
+  geom_line(aes(y=scd_hat),colour="darkred") + 
+  geom_point(aes(y=scd), size = 0.3) +
+  scale_x_continuous(name="Game") +
+  scale_y_continuous(name="Score Difference", minor_breaks = seq(-6, 6, 1), 
+                     sec.axis = dup_axis()) 
+  #ggtitle("Estimated Score Differences using Player effects Model")
+
+```
+
+

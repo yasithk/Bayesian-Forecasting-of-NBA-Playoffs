@@ -1,0 +1,238 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(rstan)
+library(bayesplot)
+```
+
+```{r}
+ setwd("~/Honours/Data/Scrapping/Model Fitting")
+nba <- read.csv("UpdatedFinalDataFrame21.csv", header = T)
+# 
+# nba$score_diff <- nba$H.Score - nba$A.Score
+# 
+# nba$nteams <- length(unique(nba$Home.Team))
+# nba$ngames <- length(nba$score_diff)
+# nba$nweeks <- floor(2*nba$ngames/nba$nteams) 
+```
+
+#STAN code
+
+following the epl model. But unsure some bit on how to include/not include parameters. 
+
+```{stan output.var="nba_model"}
+data{
+int<lower=1> nteams; 
+int<lower=1> ngames;
+int<lower=1> nweeks;
+int<lower=1> home_week[ngames]; // week number for the home team
+int<lower=1> away_week[ngames]; // week number for the away team
+int<lower=1, upper=nteams> home_team[ngames]; // home team ID (1, ..., 20)
+int<lower=1, upper=nteams> away_team[ngames]; // away team ID (1, ..., 20)
+vector[ngames] score_diff; // home_goals - away_goals
+
+}
+parameters {
+real b_home; // the effect of hosting the game in mean of score_diff dist.
+//real b_prev; // regression coefficient of prev_perf
+real<lower=0> sigma_a0; // teams ability variation
+real<lower=0> tau_a; // hyper-param for game-to-game variation
+real<lower=1> nu; // t-dist degree of freedom
+real<lower=0> sigma_y; // score_diff variation
+row_vector<lower=0>[nteams] sigma_a_raw; // game-to-game variation
+matrix[nweeks,nteams] eta_a; // random component
+}
+
+transformed parameters {
+matrix[nweeks, nteams] a; // team abilities
+row_vector<lower=0>[nteams] sigma_a; // game-to-game variation
+vector[ngames] a_diff;
+vector[ngames] mu;
+
+
+a[1] =  sigma_a0 * eta_a[1]; // initial abilities (at week 1)
+sigma_a = tau_a * sigma_a_raw; //performance evolves from week to week
+  for (w in 2:nweeks) {
+    a[w] = a[w-1] + sigma_a .* eta_a[w]; // evolution of abilities
+  }
+
+  for (g in 1:ngames) {
+    a_diff[g] = a[home_week[g],home_team[g]] - a[away_week[g],away_team[g]];
+    // additional reg parameters e.g. rest of home, rest of away team
+    mu[g] = a_diff[g] + b_home; // + beta1*resthome[g] + beta2*restaway[g](come in via the data section)
+  }
+}
+
+model {
+
+// Priors
+nu ~ gamma(2,0.1);
+//b_prev ~ normal(0,1);
+sigma_a0 ~ normal(0,1);
+sigma_y ~ cauchy(0,5); 
+b_home ~ normal(0,1); //blangiardo uses N(0,0.0001)
+sigma_a_raw ~ normal(0,1);
+tau_a ~ cauchy(0,1);
+to_vector(eta_a) ~ normal(0,1);
+// Likelihood
+score_diff ~ student_t(nu, mu, sigma_y);
+}
+
+generated quantities {
+vector[ngames] score_diff_rep;
+for (g in 1:ngames)
+score_diff_rep[g] = student_t_rng(nu, a[home_week[g], home_team[g]] -a[away_week[g],away_team[g]]+b_home, sigma_y);
+}
+
+```
+
+##Fitting the model
+
+```{r}
+setwd("~/Honours/Data/Scrapping") 
+nba <- read.csv("UpdatedFinalDataFrame21.csv", header = T)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+nsamples <- 2000
+a_sims <- array(NA, c(nsamples, nba$nweeks, nba$nteams))
+dat <- NULL
+dat$nteams <- 30
+dat$ngames <- 1230
+dat$nweeks <- 82
+
+for( w in 1:82){
+  nba_w <- nba
+  idx <- c(1:82)
+}
+dat$home_team <- nba$H.Team.ID
+dat$away_team <- nba$Away.Team.ID
+dat$home_week <- nba$home_week
+dat$away_week <- nba$away_week
+dat$score_diff <- nba$H.Score - nba$A.Score
+
+
+dynamic <- sampling(nba_model, chains = 4, iter = (nsamples/2), data = dat)
+
+vectofOBS <- dat$score_diff  
+```
+
+```{r}
+library("shinystan")
+launch_shinystan(fit)
+
+saveRDS(dynamic, "dynamic.rds")
+```
+#Parameter Estimates
+```{r}
+sum_fit <- summary(fit)
+sf <- sum_fit$summary
+
+a_sim <- as.matrix(fit, pars="a")
+dim(a_sim)
+
+#find the game ids played at home by each team
+home_games <- matrix(data = NA, nrow = 41, ncol = 30)
+for( i in 1:30){
+  m1 <- select(filter(nba, H.Team.ID == i), home_week)
+  m2 <- melt(m1)
+  m3 <- m2$value
+  home_games[,i] <- m3
+}
+#find the game ids played at away by each team
+away_games <- matrix(data = NA, nrow = 41, ncol = 30)
+for( i in 1:30){
+  a1 <- select(filter(nba, Away.Team.ID == i), away_week)
+  a2 <- melt(a1)
+  a3 <- a2$value
+  away_games[,i] <- a3
+}
+
+################### Mean strengths - home and away  
+avg_strengths <- array(data =NA, dim = c(2000,82,30))
+for( i in 1:30){
+ avg_strengths[,,i] <- a_sim[, (i*82-81):(i*82)]
+}
+
+avg_std_1 <- matrix(data = NA, ncol = 6, nrow = 30)
+
+for(i in 1:30){
+  avg_std_1[i,1] <- mean(avg_strengths[,home_games[i],i])
+}
+for(i in 1:30){
+  avg_std_1[i,2] <- mean((avg_strengths[,away_games[i],i]))
+}
+for(i in 1:30){
+  avg_std_1[i,3] <- sd(avg_strengths[,home_games[i],i])
+}
+
+for(i in 1:30){
+  avg_std_1[i,4] <- sd(avg_strengths[,away_games[i],i])
+}
+
+
+
+```
+
+
+```{r}
+
+home_matrix <- (as.matrix(fit, pars = c( "home_strength[1]","home_strength[2]","home_strength[3]","home_strength[4]", "home_strength[5]", "home_strength[6]", "home_strength[7]", "home_strength[8]", "home_strength[9]", "home_strength[10]", "home_strength[11]", "home_strength[12]", "home_strength[13]", "home_strength[14]", "home_strength[15]", "home_strength[16]", "home_strength[17]", "home_strength[18]", "home_strength[19]", "home_strength[20]", "home_strength[21]", "home_strength[22]", "home_strength[23]", "home_strength[24]", "home_strength[25]", "home_strength[26]", "home_strength[27]", "home_strength[28]", "home_strength[29]", "home_strength[30]")))/82
+
+away_matrix <- (as.matrix(fit,pars = c( "away_strength[1]","away_strength[2]","away_strength[3]","away_strength[4]", "away_strength[5]", "away_strength[6]", "away_strength[7]", "away_strength[8]", "away_strength[9]", "away_strength[10]", "away_strength[11]", "away_strength[12]", "away_strength[13]", "away_strength[14]", "away_strength[15]", "away_strength[16]", "away_strength[17]", "away_strength[18]", "away_strength[19]", "away_strength[20]", "away_strength[21]", "away_strength[22]", "away_strength[23]", "away_strength[24]", "away_strength[25]", "away_strength[26]", "away_strength[27]", "away_strength[28]", "away_strength[29]", "away_strength[30]")))/82
+cor_vec <- rep(data=0, 30)
+
+for(i in 1:30){
+cor_vec[i] <- cor(home_matrix[,i], away_matrix[,i])  
+}
+
+cor_vec
+
+```
+```
+```{r}
+library(ggplot2)
+library(matrixStats)
+#fit <- readRDS("FITS/fit_38.rds")
+sims <- extract(rd1)
+scd <- rd2$Score_Diff
+scd_sims <- sims$score_diff_rep
+scd_hat <- colMedians(scd_sims)
+scd_se <- sqrt(colVars(scd_sims))
+alpha <- 0.95;
+scd_ub <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+alpha <- 0.5;
+scd_ub2 <- colQuantiles(scd_sims, probs = 1-(1-alpha)/2)
+scd_lb2 <- colQuantiles(scd_sims, probs = (1-alpha)/2)
+
+sort_scd <- scd[order(scd)]
+sort_scd_hat <- scd_hat[order(scd)]
+sort_scd_se <- scd_se[order(scd)]
+sort_scd_ub <- scd_ub[order(scd)]
+sort_scd_lb <- scd_lb[order(scd)]
+sort_scd_ub2 <- scd_ub2[order(scd)]
+sort_scd_lb2 <- scd_lb2[order(scd)]
+df <- data.frame(list(scd = sort_scd, scd_hat = sort_scd_hat, scd_se = sort_scd_se, 
+                      scd_ub = sort_scd_ub, scd_lb = sort_scd_lb, 
+                      scd_ub2 = sort_scd_ub2, scd_lb2 = sort_scd_lb2))
+
+ggplot(df, aes(x = c(1:8))) +
+  geom_ribbon(aes(ymin = scd_lb,
+                  ymax = scd_ub),
+              fill="lightyellow") + 
+  geom_ribbon(aes(ymin = scd_lb2,
+                  ymax = scd_ub2),
+              fill="khaki3") + 
+  geom_line(aes(y=scd_hat),colour="darkred") + 
+  geom_point(aes(y=scd), size = 0.3) +
+  scale_x_continuous(name="game") +
+  scale_y_continuous(name="score difference", minor_breaks = seq(-6, 6, 1), 
+                     sec.axis = dup_axis()) +
+  ggtitle("Estimated score differences using Player effects model with rest covariate")
+
+```
